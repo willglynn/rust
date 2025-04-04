@@ -46,6 +46,7 @@ fn errors_on_missing_links() {
         )]),
         paths: FxHashMap::default(),
         external_crates: FxHashMap::default(),
+        target: rustdoc_json_types::Target { triple: "".to_string(), target_features: vec![] },
         format_version: rustdoc_json_types::FORMAT_VERSION,
     };
 
@@ -116,6 +117,7 @@ fn errors_on_local_in_paths_and_not_index() {
             },
         )]),
         external_crates: FxHashMap::default(),
+        target: rustdoc_json_types::Target { triple: "".to_string(), target_features: vec![] },
         format_version: rustdoc_json_types::FORMAT_VERSION,
     };
 
@@ -156,6 +158,7 @@ fn checks_local_crate_id_is_correct() {
         )]),
         paths: FxHashMap::default(),
         external_crates: FxHashMap::default(),
+        target: rustdoc_json_types::Target { triple: "".to_string(), target_features: vec![] },
         format_version: FORMAT_VERSION,
     };
     check(&krate, &[]);
