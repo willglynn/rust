@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use rustc_data_structures::fx::FxHashMap;
+use rustc_data_structures::fx::FxHashSet;
 use rustc_hir::def_id::{DefId, DefIdSet};
 use rustc_middle::ty::TyCtxt;
 use rustc_session::Session;
@@ -97,6 +98,33 @@ impl<'tcx> JsonRenderer<'tcx> {
                     .collect()
             })
             .unwrap_or_default()
+    }
+}
+
+fn target(sess: &rustc_session::Session) -> types::Target {
+    // Build a set of which features are enabled on this target
+    let globally_enabled_features: FxHashSet<&str> =
+        sess.unstable_target_features.iter().map(|name| name.as_str()).collect();
+
+    use rustc_target::target_features::Stability;
+
+    types::Target {
+        triple: sess.opts.target_triple.triple().into(),
+        target_features: sess
+            .target
+            .supported_target_features()
+            .into_iter()
+            .copied()
+            .map(|(name, stability)| types::TargetFeature {
+                name: name.into(),
+                unstable_feature_gate: match stability {
+                    Stability::Unstable(feature_gate) => Some(feature_gate.as_str().into()),
+                    _ => None,
+                },
+                implies_features: [].into(),
+                globally_enabled: globally_enabled_features.contains(name),
+            })
+            .collect(),
     }
 }
 
@@ -227,6 +255,12 @@ impl<'tcx> FormatRenderer<'tcx> for JsonRenderer<'tcx> {
 
         let index = (*self.index).clone().into_inner();
 
+        // Note that tcx.rust_target_features is inappropriate here because rustdoc tries to run for
+        // multiple targets: https://github.com/rust-lang/rust/pull/137632
+        //
+        // We want to describe a single target, so pass tcx.sess rather than tcx.
+        let target = target(self.tcx.sess);
+
         debug!("Constructing Output");
         // This needs to be the default HashMap for compatibility with the public interface for
         // rustdoc-json-types
@@ -270,6 +304,7 @@ impl<'tcx> FormatRenderer<'tcx> for JsonRenderer<'tcx> {
                     )
                 })
                 .collect(),
+            target,
             format_version: types::FORMAT_VERSION,
         };
         let out_dir = self.out_path.clone();
