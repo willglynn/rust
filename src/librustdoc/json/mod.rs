@@ -13,6 +13,7 @@ use std::io::{BufWriter, Write, stdout};
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use rustc_data_structures::fx::FxHashSet;
 use rustc_hir::def_id::{DefId, DefIdSet};
 use rustc_middle::ty::TyCtxt;
 use rustc_session::Session;
@@ -128,6 +129,62 @@ impl<'tcx> JsonRenderer<'tcx> {
             try_err!(writer.flush(), path);
             Ok(())
         })
+    }
+}
+
+fn target(sess: &rustc_session::Session) -> types::Target {
+    // Build a set of which features are enabled on this target
+    let globally_enabled_features: FxHashSet<&str> =
+        sess.unstable_target_features.iter().map(|name| name.as_str()).collect();
+
+    // Build a map of target feature stability by feature name
+    use rustc_target::target_features::Stability;
+    let feature_stability: FxHashMap<&str, Stability<_>> = sess
+        .target
+        .rust_target_features()
+        .into_iter()
+        .cloned()
+        .map(|(name, stability, _)| (name, stability))
+        .collect();
+
+    types::Target {
+        triple: sess.opts.target_triple.tuple().into(),
+        target_features: sess
+            .target
+            .rust_target_features()
+            .into_iter()
+            .cloned()
+            .filter(|(_, stability, _)| {
+                // Describe only target features which the user can toggle
+                stability.toggle_allowed(&sess.target, true).is_ok()
+            })
+            .map(|(name, stability, implied_features)| {
+                types::TargetFeature {
+                    name: name.into(),
+                    unstable_feature_gate: match stability {
+                        Stability::Unstable { nightly_feature: feature_gate, .. } => {
+                            Some(feature_gate.as_str().into())
+                        }
+                        _ => None,
+                    },
+                    implies_features: implied_features
+                        .into_iter()
+                        .copied()
+                        .filter(|name| {
+                            // Imply only target features which the user can toggle
+                            feature_stability
+                                .get(name)
+                                .map(|stability| {
+                                    stability.toggle_allowed(&sess.target, true).is_ok()
+                                })
+                                .unwrap_or(false)
+                        })
+                        .map(String::from)
+                        .collect(),
+                    globally_enabled: globally_enabled_features.contains(name),
+                }
+            })
+            .collect(),
     }
 }
 
@@ -256,6 +313,12 @@ impl<'tcx> FormatRenderer<'tcx> for JsonRenderer<'tcx> {
         let e = ExternalCrate { crate_num: LOCAL_CRATE };
         let index = (*self.index).clone().into_inner();
 
+        // Note that tcx.rust_target_features is inappropriate here because rustdoc tries to run for
+        // multiple targets: https://github.com/rust-lang/rust/pull/137632
+        //
+        // We want to describe a single target, so pass tcx.sess rather than tcx.
+        let target = target(self.tcx.sess);
+
         debug!("Constructing Output");
         let output_crate = types::Crate {
             root: self.id_from_item_default(e.def_id().into()),
@@ -268,11 +331,14 @@ impl<'tcx> FormatRenderer<'tcx> for JsonRenderer<'tcx> {
                 .iter()
                 .chain(&self.cache.external_paths)
                 .map(|(&k, &(ref path, kind))| {
-                    (self.id_from_item_default(k.into()), types::ItemSummary {
-                        crate_id: k.krate.as_u32(),
-                        path: path.iter().map(|s| s.to_string()).collect(),
-                        kind: kind.into_json(self),
-                    })
+                    (
+                        self.id_from_item_default(k.into()),
+                        types::ItemSummary {
+                            crate_id: k.krate.as_u32(),
+                            path: path.iter().map(|s| s.to_string()).collect(),
+                            kind: kind.into_json(self),
+                        },
+                    )
                 })
                 .collect(),
             external_crates: self
@@ -281,15 +347,19 @@ impl<'tcx> FormatRenderer<'tcx> for JsonRenderer<'tcx> {
                 .iter()
                 .map(|(crate_num, external_location)| {
                     let e = ExternalCrate { crate_num: *crate_num };
-                    (crate_num.as_u32(), types::ExternalCrate {
-                        name: e.name(self.tcx).to_string(),
-                        html_root_url: match external_location {
-                            ExternalLocation::Remote(s) => Some(s.clone()),
-                            _ => None,
+                    (
+                        crate_num.as_u32(),
+                        types::ExternalCrate {
+                            name: e.name(self.tcx).to_string(),
+                            html_root_url: match external_location {
+                                ExternalLocation::Remote(s) => Some(s.clone()),
+                                _ => None,
+                            },
                         },
-                    })
+                    )
                 })
                 .collect(),
+            target,
             format_version: types::FORMAT_VERSION,
         };
         if let Some(ref out_dir) = self.out_dir {
